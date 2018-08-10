@@ -5,6 +5,7 @@
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE QuasiQuotes                #-}
 {-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeApplications           #-}
 {-# LANGUAGE TypeFamilies               #-}
 
@@ -117,11 +118,11 @@ purgeDep :: (CacheRWM m, MonadError QErr m, MonadTx m)
 purgeDep schemaObjId = case schemaObjId of
   (SOTableObj tn (TOPerm rn pt)) -> do
     liftTx $ dropPermFromCatalog tn rn pt
-    withPermType pt delPermFromCache rn tn
+    void $ withPermType pt delPermFromCache rn tn
 
   (SOTableObj qt (TORel rn))     -> do
     liftTx $ delRelFromCatalog qt rn
-    delFldFromCache (fromRel rn) qt
+    void $ delFldFromCache (fromRel rn) qt
 
   (SOQTemplate qtn)              -> do
     liftTx $ delQTemplateFromCatalog qtn
@@ -160,14 +161,14 @@ processTableChanges ti tableDiff = do
            let colId   = SOTableObj tn $ TOCol oColName
                depObjs = getDependentObjsWith (== "on_type") sc colId
            if null depObjs
-             then updateFldInCache oColName $ FIColumn nci
+             then void $ updateFldInCache oColName $ FIColumn nci
              else throw400 DependencyError $ "cannot change type of column " <> oColName <<> " in table "
                   <> tn <<> " because of the following dependencies : " <>
                   reportSchemaObjs depObjs
        | otherwise -> return ()
   where
     updateFldInCache cn ci = do
-      delFldFromCache (fromPGCol cn) tn
+      void $ delFldFromCache (fromPGCol cn) tn
       addFldToCache (fromPGCol cn) ci tn
     tn = tiName ti
     TableDiff mNewName droppedCols addedCols alteredCols _ = tableDiff
@@ -327,8 +328,8 @@ buildSchemaCache = flip execStateT emptySchemaCache $ do
           permDef = PermDef rn perm Nothing
           createPerm = WithTable qt permDef
       p1Res <- liftP1 qCtx $ phaseOne createPerm
-      addPermP2Setup qt permDef p1Res
-      addPermToCache qt rn pa p1Res
+      ti <- addPermToCache qt rn pa p1Res
+      addPermP2Setup qt p1Res ti
       -- p2F qt rn p1Res
 
     fetchTables =
@@ -405,8 +406,9 @@ runSqlP2 (RunSQL t cascade) = do
   -- recreate the insert permission infra
   forM_ (M.elems $ scTables postSc) $ \ti -> do
     let tn = tiName ti
-    forM_ (M.elems $ tiRolePermInfoMap ti) $ \rpi ->
-      maybe (return ()) (liftTx . buildInsInfra tn) $ _permIns rpi
+        insPerms = catMaybes
+          [ (r,) <$> _permIns p | (r, p) <- M.toList $ tiRolePermInfoMap ti]
+    bool (liftTx $ buildInsInfra tn insPerms) (return ()) $ null insPerms
 
   return $ encode (res :: RunSQLRes)
 

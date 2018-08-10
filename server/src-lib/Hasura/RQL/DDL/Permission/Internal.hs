@@ -158,11 +158,11 @@ instance (ToJSON a) => ToAesonPairs (PermDef a) where
   , "comment" .= comment
   ]
 
-data CreatePermP1Res a
-  = CreatePermP1Res
-  { cprInfo :: !a
-  , cprDeps :: ![SchemaDependency]
-  } deriving (Show, Eq)
+-- data CreatePermP1Res a
+--   = CreatePermP1Res
+--   { cprInfo :: !a
+--   , cprDeps :: ![SchemaDependency]
+--   } deriving (Show, Eq)
 
 createPermP1 :: (P1C m) => QualifiedTable -> m TableInfo
 createPermP1 tn = do
@@ -250,8 +250,6 @@ type family PermInfo a = r | r -> a
 
 class (ToJSON a) => IsPerm a where
 
-  type DropPermP1Res a
-
   permAccessor
     :: PermAccessor (PermInfo a)
 
@@ -262,15 +260,11 @@ class (ToJSON a) => IsPerm a where
     -> m (PermInfo a)
 
   addPermP2Setup
-    :: (CacheRWM m, MonadTx m) => QualifiedTable -> PermDef a -> PermInfo a -> m ()
-
-  buildDropPermP1Res
-    :: (QErrM m, CacheRM m, UserInfoM m)
-    => DropPerm a
-    -> m (DropPermP1Res a)
+    :: (MonadTx m)
+    => QualifiedTable -> PermInfo a -> TableInfo -> m ()
 
   dropPermP2Setup
-    :: (CacheRWM m, MonadTx m) => DropPerm a -> DropPermP1Res a -> m ()
+    :: (MonadTx m) => DropPerm a -> TableInfo -> m ()
 
   getPermAcc1
     :: PermDef a -> PermAccessor (PermInfo a)
@@ -280,7 +274,8 @@ class (ToJSON a) => IsPerm a where
     :: DropPerm a -> PermAccessor (PermInfo a)
   getPermAcc2 _ = permAccessor
 
-addPermP1 :: (QErrM m, CacheRM m, IsPerm a) => TableInfo -> PermDef a -> m (PermInfo a)
+addPermP1 :: (QErrM m, CacheRM m, IsPerm a)
+          => TableInfo -> PermDef a -> m (PermInfo a)
 addPermP1 tabInfo pd = do
   assertPermNotDefined (pdRole pd) (getPermAcc1 pd) tabInfo
   buildPermInfo tabInfo pd
@@ -288,8 +283,8 @@ addPermP1 tabInfo pd = do
 addPermP2 :: (IsPerm a, QErrM m, CacheRWM m, MonadTx m)
           => QualifiedTable -> PermDef a -> PermInfo a -> m ()
 addPermP2 tn pd permInfo = do
-  addPermP2Setup tn pd permInfo
-  addPermToCache tn (pdRole pd) pa permInfo
+  ti <- addPermToCache tn (pdRole pd) pa permInfo
+  addPermP2Setup tn permInfo ti
   liftTx $ savePermToCatalog pt tn pd
   where
     pa = getPermAcc1 pd
@@ -309,7 +304,9 @@ instance (IsPerm a) => HDBQuery (CreatePerm a) where
 
   schemaCachePolicy = SCPReload
 
-dropPermP1 :: (QErrM m, CacheRM m, UserInfoM m, IsPerm a) => DropPerm a -> m (PermInfo a)
+dropPermP1
+  :: (QErrM m, CacheRM m, UserInfoM m, IsPerm a)
+  => DropPerm a -> m (PermInfo a)
 dropPermP1 dp@(DropPerm tn rn) = do
   adminOnly
   tabInfo <- askTabInfo tn
@@ -317,21 +314,22 @@ dropPermP1 dp@(DropPerm tn rn) = do
 
 dropPermP2
   :: (IsPerm a, QErrM m, CacheRWM m, MonadTx m)
-  => DropPerm a -> DropPermP1Res a -> m ()
-dropPermP2 dp@(DropPerm tn rn) p1Res = do
-  dropPermP2Setup dp p1Res
-  delPermFromCache pa rn tn
-  liftTx $ dropPermFromCatalog tn rn pt
+  => DropPerm a -> m ()
+dropPermP2 dp@(DropPerm tn rn) = do
+  ti <- delPermFromCache pa rn tn
+  liftTx $ do
+    dropPermP2Setup dp ti
+    dropPermFromCatalog tn rn pt
   where
     pa = getPermAcc2 dp
     pt = permAccToType pa
 
 instance (IsPerm a) => HDBQuery (DropPerm a) where
 
-  type Phase1Res (DropPerm a) = DropPermP1Res a
+  type Phase1Res (DropPerm a) = ()
 
-  phaseOne = buildDropPermP1Res
+  phaseOne = void . dropPermP1
 
-  phaseTwo dp p1Res = dropPermP2 dp p1Res >> return successMsg
+  phaseTwo dp _ = dropPermP2 dp >> return successMsg
 
   schemaCachePolicy = SCPReload

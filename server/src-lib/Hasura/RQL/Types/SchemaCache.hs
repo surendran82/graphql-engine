@@ -247,7 +247,7 @@ instance ToJSON S.BoolExp where
 
 data InsPermInfo
   = InsPermInfo
-  { ipiView            :: !QualifiedTable
+  { ipiTable           :: !QualifiedTable
   , ipiCheck           :: !S.BoolExp
   , ipiAllowUpsert     :: !Bool
   , ipiDeps            :: ![SchemaDependency]
@@ -477,16 +477,17 @@ assertTableNotExists tn sc =
 modTableInCache :: (QErrM m, CacheRWM m)
                 => (TableInfo -> m TableInfo)
                 -> QualifiedTable
-                -> m ()
+                -> m TableInfo
 modTableInCache f tn = do
   sc <- askSchemaCache
   ti <- getTableInfoFromCache tn sc
   newTi <- f ti
   modTableCache $ M.insert tn newTi $ scTables sc
+  return newTi
 
 addFldToCache :: (QErrM m, CacheRWM m)
               => FieldName -> FieldInfo
-              -> QualifiedTable -> m ()
+              -> QualifiedTable -> m TableInfo
 addFldToCache fn fi =
   modTableInCache modFieldInfoMap
   where
@@ -498,7 +499,7 @@ addFldToCache fn fi =
           ti { tiFieldInfoMap = M.insert fn fi fim }
 
 delFldFromCache :: (QErrM m, CacheRWM m)
-                => FieldName -> QualifiedTable -> m ()
+                => FieldName -> QualifiedTable -> m TableInfo
 delFldFromCache fn =
   modTableInCache modFieldInfoMap
   where
@@ -538,7 +539,7 @@ addPermToCache
   -> RoleName
   -> PermAccessor a
   -> a
-  -> m ()
+  -> m TableInfo
 addPermToCache tn rn pa i =
   modTableInCache modRolePermInfo tn
   where
@@ -569,7 +570,7 @@ delPermFromCache
   => PermAccessor a
   -> RoleName
   -> QualifiedTable
-  -> m ()
+  -> m TableInfo
 delPermFromCache pa rn =
   modTableInCache modRolePermInfo
   where

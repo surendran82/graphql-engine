@@ -115,18 +115,18 @@ parseOnConflict cols val =
     mkConflictClause cols action constraintM
 
 convertInsert
-  :: (QualifiedTable, QualifiedTable) -- table, view
+  :: QualifiedTable -- table
   -> [PGCol] -- all the columns in this table
   -> Field -- the mutation field
   -> Convert RespTx
-convertInsert (tn, vn) tableCols fld = do
+convertInsert tn tableCols fld = do
   rows    <- withArg arguments "objects" asRowExps
   onConflictM <- withPathK "on_conflict" $
                  withArgM arguments "on_conflict" $
                  parseOnConflict tableCols
   mutFlds <- convertMutResp (_fType fld) $ _fSelSet fld
   args <- get
-  let p1 = RI.InsertQueryP1 tn vn tableCols rows onConflictM mutFlds
+  let p1 = RI.InsertQueryP1 tn tableCols rows onConflictM mutFlds
   return $ RI.insertP2 (p1, args)
   where
     arguments = _fArguments fld

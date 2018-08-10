@@ -44,7 +44,7 @@ type OpCtxMap = Map.HashMap G.Name OpCtx
 
 data OpCtx
   -- tn, vn, cols, req hdrs
-  = OCInsert QualifiedTable QualifiedTable [PGCol] [T.Text]
+  = OCInsert QualifiedTable [PGCol] [T.Text]
   -- tn, filter exp, limit, req hdrs
   | OCSelect QualifiedTable S.BoolExp (Maybe Int) [T.Text]
   -- tn, filter exp, req hdrs
@@ -894,7 +894,7 @@ getRootFldsRole'
   :: QualifiedTable
   -> [TableConstraint]
   -> FieldInfoMap
-  -> Maybe (QualifiedTable, [T.Text]) -- insert view
+  -> Maybe ([T.Text]) -- insert view
   -> Maybe (S.BoolExp, Maybe Int, [T.Text]) -- select filter
   -> Maybe ([PGCol], S.BoolExp, [T.Text]) -- update filter
   -> Maybe (S.BoolExp, [T.Text]) -- delete filter
@@ -908,8 +908,8 @@ getRootFldsRole' tn constraints fields insM selM updM delM =
             [ getInsDet <$> insM, getSelDet <$> selM
             , getUpdDet <$> updM, getDelDet <$> delM]
     colInfos = fst $ validPartitionFieldInfoMap fields
-    getInsDet (vn, hdrs) =
-      (OCInsert tn vn (map pgiName colInfos) hdrs, Right $ mkInsMutFld tn constraints)
+    getInsDet hdrs =
+      (OCInsert tn (map pgiName colInfos) hdrs, Right $ mkInsMutFld tn constraints)
     getUpdDet (updCols, updFltr, hdrs) =
       ( OCUpdate tn updFltr hdrs
       , Right $ mkUpdMutFld tn $ getUpdColInfos updCols
@@ -987,7 +987,7 @@ getRootFldsRole tn constraints fields (RolePermInfo insM selM updM delM) =
   (mkIns <$> insM) (mkSel <$> selM)
   (mkUpd <$> updM) (mkDel <$> delM)
   where
-    mkIns i = (ipiView i, ipiRequiredHeaders i)
+    mkIns i = ipiRequiredHeaders i
     mkSel s = (spiFilter s, spiLimit s, spiRequiredHeaders s)
     mkUpd u = ( Set.toList $ upiCols u
               , upiFilter u
@@ -1014,7 +1014,7 @@ mkGCtxMapTable tableCache (TableInfo tn _ fields rolePerms constraints) = do
       FIRelationship relInfo -> Right (relInfo, noFilter, Nothing)
     noFilter = S.BELit True
     adminRootFlds =
-      getRootFldsRole' tn constraints fields (Just (tn, [])) (Just (noFilter, Nothing, []))
+      getRootFldsRole' tn constraints fields (Just []) (Just (noFilter, Nothing, []))
       (Just (allCols, noFilter, [])) (Just (noFilter, []))
 
 mkScalarTyInfo :: PGColType -> ScalarTyInfo

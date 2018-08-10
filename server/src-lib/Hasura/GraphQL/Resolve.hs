@@ -35,8 +35,8 @@ buildTx userInfo gCtx fld = do
     OCSelect tn permFilter permLimit hdrs ->
       validateHdrs hdrs >> RS.convertSelect tn permFilter permLimit fld
       -- RS.convertSelect tn permFilter fld
-    OCInsert tn vn cols hdrs    ->
-      validateHdrs hdrs >> RM.convertInsert (tn, vn) cols fld
+    OCInsert tn cols hdrs    ->
+      validateHdrs hdrs >> RM.convertInsert tn cols fld
       -- RM.convertInsert (tn, vn) cols fld
     OCUpdate tn permFilter hdrs ->
       validateHdrs hdrs >> RM.convertUpdate tn permFilter fld

@@ -9,7 +9,7 @@ clearHdbViews =
   "DO $$ DECLARE \
    \ r RECORD; \
    \ BEGIN \
-   \   FOR r IN (SELECT viewname FROM pg_views WHERE schemaname = 'hdb_views') LOOP \
-   \     EXECUTE 'DROP VIEW IF EXISTS hdb_views.' || quote_ident(r.viewname) || ' CASCADE'; \
+   \   FOR r IN (select routine_name from information_schema.routines where routine_schema = 'hdb_views') LOOP \
+   \     EXECUTE 'DROP FUNCTION hdb_views.' || quote_ident(r.routine_name) || '() CASCADE'; \
    \   END LOOP; \
    \ END $$ "

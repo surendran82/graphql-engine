@@ -34,7 +34,6 @@ data ConflictClauseP1
 data InsertQueryP1
   = InsertQueryP1
   { iqp1Table    :: !QualifiedTable
-  , iqp1View     :: !QualifiedTable
   , iqp1Cols     :: ![PGCol]
   , iqp1Tuples   :: ![[S.SQLExp]]
   , iqp1Conflict :: !(Maybe ConflictClauseP1)
@@ -42,11 +41,11 @@ data InsertQueryP1
   } deriving (Show, Eq)
 
 mkSQLInsert :: InsertQueryP1 -> S.SelectWith
-mkSQLInsert (InsertQueryP1 _ vn cols vals c mutFlds) =
+mkSQLInsert (InsertQueryP1 tn cols vals c mutFlds) =
   mkSelWith (S.CTEInsert insert) mutFlds
   where
     insert =
-      S.SQLInsert vn cols vals (toSQLConflict c) $ Just S.returningStar
+      S.SQLInsert tn cols vals (toSQLConflict c) $ Just S.returningStar
     toSQLConflict conflict = case conflict of
       Nothing -> Nothing
       Just (CP1DoNothing Nothing)   -> Just $ S.DoNothing Nothing
@@ -68,7 +67,7 @@ mkDefValMap cim =
 
 getInsertDeps
   :: InsertQueryP1 -> [SchemaDependency]
-getInsertDeps (InsertQueryP1 tn _ _ _ _ mutFlds) =
+getInsertDeps (InsertQueryP1 tn _ _ _ mutFlds) =
   mkParentDep tn : retDeps
   where
     retDeps = map (mkColDep "untyped" tn . fst) $
@@ -165,7 +164,6 @@ convInsertQuery objsParser prepFn (InsertQuery tableName val oC mRetCols) = do
 
   let defInsVals = mkDefValMap fieldInfoMap
       insCols    = HM.keys defInsVals
-      insView    = ipiView insPerm
 
   insTuples <- withPathK "objects" $ indexedForM insObjs $ \obj ->
     convObj prepFn defInsVals fieldInfoMap obj
@@ -175,7 +173,7 @@ convInsertQuery objsParser prepFn (InsertQuery tableName val oC mRetCols) = do
       unless (ipiAllowUpsert insPerm) $ throw400 PermissionDenied $
         "upsert is not allowed for role" <>> roleName
       buildConflictClause tableInfo c
-  return $ InsertQueryP1 tableName insView insCols insTuples
+  return $ InsertQueryP1 tableName insCols insTuples
            conflictClause mutFlds
 
   where

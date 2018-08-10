@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes       #-}
 {-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE TupleSections     #-}
 {-# LANGUAGE TypeFamilies      #-}
 
 module Hasura.RQL.DDL.Permission
@@ -62,6 +63,7 @@ import           Data.Aeson.TH
 import           Language.Haskell.TH.Syntax         (Lift)
 
 import qualified Data.ByteString.Builder            as BB
+import qualified Data.HashMap.Strict                as M
 import qualified Data.HashSet                       as HS
 import qualified Data.Text                          as T
 
@@ -77,115 +79,133 @@ $(deriveJSON (aesonDrop 2 snakeCase){omitNothingFields=True} ''InsPerm)
 type InsPermDef = PermDef InsPerm
 type CreateInsPerm = CreatePerm InsPerm
 
-buildViewName :: QualifiedTable -> RoleName -> PermType -> QualifiedTable
-buildViewName (QualifiedTable sn tn) (RoleName rTxt) pt =
+buildFnName :: QualifiedTable -> QualifiedTable
+buildFnName (QualifiedTable sn tn) =
   QualifiedTable hdbViewsSchema $ TableName
-  (rTxt <> "__" <> T.pack (show pt) <> "__" <> snTxt <> "__" <> tnTxt)
+  (snTxt <> "__" <> tnTxt)
   where
     hdbViewsSchema = SchemaName "hdb_views"
     snTxt = getSchemaTxt sn
     tnTxt = getTableTxt tn
 
-buildView :: QualifiedTable -> QualifiedTable -> Q.Query
-buildView tn vn =
-  Q.fromBuilder $ mconcat
-  [ BB.string7 "CREATE VIEW " <> toSQL vn
-  , BB.string7 " AS SELECT * FROM " <> toSQL tn
-  ]
-
-dropView :: QualifiedTable -> Q.Tx ()
-dropView vn =
-  Q.unitQ dropViewS () False
-  where
-    dropViewS = Q.fromBuilder $
-      BB.string7 "DROP VIEW " <> toSQL vn
-
 buildInsTrig :: QualifiedTable -> Q.Query
-buildInsTrig qt@(QualifiedTable _ tn) =
+buildInsTrig qt =
   Q.fromBuilder $ mconcat
-  [ BB.string7 "CREATE TRIGGER " <> toSQL tn
-  , BB.string7 " INSTEAD OF INSERT ON " <> toSQL qt
+  [ BB.string7 "CREATE TRIGGER __hasura_insert_permissions"
+  , BB.string7 " BEFORE INSERT ON " <> toSQL qt
   , BB.string7 " FOR EACH ROW EXECUTE PROCEDURE "
-  , toSQL qt <> BB.string7 "();"
+  , toSQL (buildFnName qt) <> BB.string7 "();"
   ]
 
 dropInsTrigFn :: QualifiedTable -> Q.Query
-dropInsTrigFn fn =
-  Q.fromBuilder $ BB.string7 "DROP FUNCTION " <> toSQL fn <> "()"
+dropInsTrigFn tn =
+  Q.fromBuilder $
+  BB.string7 "DROP FUNCTION IF EXISTS " <> toSQL (buildFnName tn)
+  <> "() CASCADE"
 
-buildInsTrigFn :: QualifiedTable -> QualifiedTable -> S.BoolExp -> Q.Query
-buildInsTrigFn fn tn be =
+buildInsTrigFn :: Int -> QualifiedTable -> TableInsPerms -> Q.Query
+buildInsTrigFn pgVer tn insPerms =
   Q.fromBuilder $ mconcat
-  [ BB.string7 "CREATE OR REPLACE FUNCTION " <> toSQL fn
+  [ BB.string7 "CREATE FUNCTION " <> toSQL fn
   , BB.string7 "() RETURNS trigger LANGUAGE plpgsql AS $$ "
-  , BB.string7 "DECLARE r " <> toSQL tn <> "%ROWTYPE; "
+  , BB.string7 "DECLARE hasura_role text;"
   , BB.string7 "BEGIN "
-  , BB.string7 "IF (" <> toSQL be <> BB.string7 ") "
-  , BB.string7 "THEN INSERT INTO " <> toSQL tn
-  , BB.string7 " VALUES (NEW.*) RETURNING * INTO r; RETURN r; "
-  , BB.string7 "ELSE RAISE check_violation using message = 'insert check constraint failed'; return NULL;"
-  , BB.string7 "END IF; "
+  , roleFrag
+  , BB.string7 "CASE WHEN (hasura_role IS NULL) THEN return NEW;"
+  , mconcat $ map roleCase insPerms
+  , BB.string7 "ELSE RAISE EXCEPTION 'unexpected role: %', hasura_role"
+  , BB.string7 "      USING HINT = 'this a hasura bug, contact support';"
+  , BB.string7 " END CASE; "
+
   , BB.string7 "END "
   , BB.string7 "$$;"
   ]
+  where
+    fn = buildFnName tn
+
+    roleCase (rn, be) =
+      "WHEN (hasura_role = " <> toSQL (S.SELit $ getRoleTxt rn) <> ") THEN " <>
+      roleCheck be
+
+    roleCheck be =
+      mconcat
+      [ BB.string7 "IF (" <> toSQL (ipiCheck be) <> BB.string7 ") "
+      , BB.string7 "THEN RETURN NEW;"
+      , BB.string7 "ELSE RAISE check_violation using message = 'insert check constraint failed'; return NULL;"
+      , BB.string7 "END IF; "
+      ]
+
+    roleFrag =
+      if pgVer >= 96000
+      then "hasura_role := current_setting('hasura.role', 't');"
+      else mconcat $ map BB.string7
+           [ "BEGIN"
+           , "  hasura_role := current_setting('hasura.role')::text;"
+           , "EXCEPTION WHEN OTHERS THEN"
+           , "  hasura_role = NULL;"
+           , "END;"
+           ]
 
 buildInsPermInfo
   :: (QErrM m, CacheRM m)
   => TableInfo
   -> PermDef InsPerm
   -> m InsPermInfo
-buildInsPermInfo tabInfo (PermDef rn (InsPerm chk upsrt) _) = do
+buildInsPermInfo tabInfo (PermDef _ (InsPerm chk upsrt) _) = do
   (be, beDeps) <- withPathK "check" $
     procBoolExp tn fieldInfoMap (S.QualVar "NEW") chk
   let deps = mkParentDep tn : beDeps
       depHeaders = getDependentHeaders chk
-  return $ InsPermInfo vn be (fromMaybe False upsrt) deps depHeaders
+  return $ InsPermInfo tn be (fromMaybe False upsrt) deps depHeaders
   where
     fieldInfoMap = tiFieldInfoMap tabInfo
     tn = tiName tabInfo
-    vn = buildViewName tn rn PTInsert
 
-buildInsInfra :: QualifiedTable -> InsPermInfo -> Q.TxE QErr ()
-buildInsInfra tn (InsPermInfo vn be _ _ _) =
+buildInsInfra :: QualifiedTable -> TableInsPerms -> Q.TxE QErr ()
+buildInsInfra tn insPerms =
   Q.catchE defaultTxErrorHandler $ do
-    -- Create the view
-    Q.unitQ (buildView tn vn) () False
-    -- Inject defaults on the view
-    Q.discardQ (injectDefaults vn tn) () False
-    -- Construct a trigger function
-    Q.unitQ (buildInsTrigFn vn tn be) () False
-    -- Add trigger for check expression
-    Q.unitQ (buildInsTrig vn) () False
+    Q.unitQ (dropInsTrigFn tn) () False
+    serverVer <- Q.serverVersion
+    Q.unitQ (buildInsTrigFn serverVer tn insPerms) () False
+    -- Add trigger to the table
+    Q.unitQ (buildInsTrig tn) () False
 
-clearInsInfra :: QualifiedTable -> Q.TxE QErr ()
-clearInsInfra vn =
-  Q.catchE defaultTxErrorHandler $ do
-    dropView vn
-    Q.unitQ (dropInsTrigFn vn) () False
+clearInsInfra :: QualifiedTable -> TableInsPerms -> Q.TxE QErr ()
+clearInsInfra tn insPerms =
+  bool (buildInsInfra tn insPerms) dropTrigFn $ null insPerms
+  where
+    dropTrigFn =
+      Q.catchE defaultTxErrorHandler $
+      Q.unitQ (dropInsTrigFn tn) () False
 
 type DropInsPerm = DropPerm InsPerm
 
-dropInsPermP2 :: (P2C m) => DropInsPerm -> QualifiedTable -> m ()
-dropInsPermP2 = dropPermP2
-
 type instance PermInfo InsPerm = InsPermInfo
 
-instance IsPerm InsPerm where
+type TableInsPerms = [(RoleName, InsPermInfo)]
 
-  type DropPermP1Res InsPerm = QualifiedTable
+dropInsPermP2 :: (P2C m) => DropInsPerm -> m ()
+dropInsPermP2 = dropPermP2
+
+instance IsPerm InsPerm where
 
   permAccessor = PAInsert
 
   buildPermInfo = buildInsPermInfo
 
-  addPermP2Setup qt _ permInfo =
-    liftTx $ buildInsInfra qt permInfo
+  addPermP2Setup tn _ tabInfo = do
+    let insPerms = catMaybes
+           [ (r,) <$> _permIns p
+           | (r, p) <- M.toList $ tiRolePermInfoMap tabInfo
+           ]
+    liftTx $ buildInsInfra tn insPerms
 
-  buildDropPermP1Res dp =
-    ipiView <$> dropPermP1 dp
-
-  dropPermP2Setup _ vn =
-    liftTx $ clearInsInfra vn
+  dropPermP2Setup dp ti = do
+    let insPerms = catMaybes
+          [ (r,) <$> _permIns p
+          | (r, p) <- M.toList $ tiRolePermInfoMap ti
+          ]
+    liftTx $ clearInsInfra (dipTable dp) insPerms
 
 -- Select constraint
 data SelPerm
@@ -232,19 +252,14 @@ type DropSelPerm = DropPerm SelPerm
 type instance PermInfo SelPerm = SelPermInfo
 
 dropSelPermP2 :: (P2C m) => DropSelPerm -> m ()
-dropSelPermP2 dp = dropPermP2 dp ()
+dropSelPermP2 = dropPermP2
 
 instance IsPerm SelPerm where
-
-  type DropPermP1Res SelPerm = ()
 
   permAccessor = PASelect
 
   buildPermInfo ti (PermDef _ a _) =
     buildSelPermInfo ti a
-
-  buildDropPermP1Res =
-    void . dropPermP1
 
   addPermP2Setup _ _ _ = return ()
 
@@ -291,11 +306,9 @@ type instance PermInfo UpdPerm = UpdPermInfo
 type DropUpdPerm = DropPerm UpdPerm
 
 dropUpdPermP2 :: (P2C m) => DropUpdPerm -> m ()
-dropUpdPermP2 dp = dropPermP2 dp ()
+dropUpdPermP2 = dropPermP2
 
 instance IsPerm UpdPerm where
-
-  type DropPermP1Res UpdPerm = ()
 
   permAccessor = PAUpdate
 
@@ -303,9 +316,6 @@ instance IsPerm UpdPerm where
     buildUpdPermInfo ti a
 
   addPermP2Setup _ _ _ = return ()
-
-  buildDropPermP1Res =
-    void . dropPermP1
 
   dropPermP2Setup _ _ = return ()
 
@@ -337,13 +347,11 @@ buildDelPermInfo tabInfo (DelPerm fltr) = do
 type DropDelPerm = DropPerm DelPerm
 
 dropDelPermP2 :: (P2C m) => DropDelPerm -> m ()
-dropDelPermP2 dp = dropPermP2 dp ()
+dropDelPermP2 = dropPermP2
 
 type instance PermInfo DelPerm = DelPermInfo
 
 instance IsPerm DelPerm where
-
-  type DropPermP1Res DelPerm = ()
 
   permAccessor = PADelete
 
@@ -351,9 +359,6 @@ instance IsPerm DelPerm where
     buildDelPermInfo ti a
 
   addPermP2Setup _ _ _ = return ()
-
-  buildDropPermP1Res =
-    void . dropPermP1
 
   dropPermP2Setup _ _ = return ()
 
@@ -409,7 +414,7 @@ setPermCommentTx (SetPermComment (QualifiedTable sn tn) rn pt comment) =
 purgePerm :: (P2C m) => QualifiedTable -> RoleName -> PermType -> m ()
 purgePerm qt rn pt =
   case pt of
-    PTInsert -> dropInsPermP2 dp $ buildViewName qt rn PTInsert
+    PTInsert -> dropInsPermP2 dp
     PTSelect -> dropSelPermP2 dp
     PTUpdate -> dropUpdPermP2 dp
     PTDelete -> dropDelPermP2 dp
