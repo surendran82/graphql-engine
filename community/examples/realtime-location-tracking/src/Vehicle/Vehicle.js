@@ -113,10 +113,7 @@ class Vehicle extends Component { constructor() {
     // require('../assets/hasura_logo.png');
     return (
       <div className="App">
-        <header className="App-header">
-          <h1 className="App-title">Realtime location tracking example</h1>
-        </header>
-        <div className="container">
+        <div>
           { this.state.startTracking ?
             [
               <ApolloConsumer key={'1'}>
