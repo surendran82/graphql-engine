@@ -1,9 +1,9 @@
 module.exports = {
     "schema": [
         {
-            "http://localhost:8080/v1alpha1/graphql": {
+            "https://whatsapp-clone-hasura.herokuapp.com/v1alpha1/graphql": {
                 "headers": {
-                    "x-hasura-admin-secret": ""
+                    "x-hasura-admin-secret": "whatsappclone"
                 }
             }
         }

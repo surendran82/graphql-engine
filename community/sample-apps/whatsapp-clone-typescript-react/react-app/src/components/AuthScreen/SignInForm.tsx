@@ -66,7 +66,7 @@ export default ({ history }: SignInFormProps) => {
           />
         </div>
         <Button
-          type="button"
+          type="submit"
           color="secondary"
           variant="contained"
           disabled={!maySignIn()}
